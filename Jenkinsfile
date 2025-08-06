@@ -2,32 +2,42 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "ahmadcloudworks/python-app"
+        IMAGE_NAME = "ahmadbilal124/python-jenkins"
+        CONTAINER_NAME = "flaskapp"
+        APP_PORT = "5000"
+        DEPLOY_USER = "ubuntu"
+        DEPLOY_HOST = "18.191.135.178"
+    }
+
+    options {
+        skipStagesAfterUnstable()  // avoid running later stages on failure
     }
 
     stages {
-        stage('Checkout') {
+        stage('Clone Repo') {
             steps {
-                git 'https://github.com/ahmad-bilal-124/flask-ci-pipeline.git'
+                git 'https://github.com/Ahmad-Bilal-124/python-jenkins.git'
             }
         }
 
-        stage('Install Dependencies') {
+        stage('Install Python Dependencies') {
             steps {
-                sh 'pip3 install -r app/requirements.txt'
+                sh '''
+                    pip3 install -r python-app/requirements.txt
+                    pip3 install pytest pylint
+                '''
             }
         }
 
         stage('Run Tests') {
             steps {
-                sh 'pytest app/test_app.py'
+                sh 'pytest python-app/test_app.py'
             }
         }
 
-        stage('Code Analysis') {
+        stage('Lint Code') {
             steps {
-                sh 'pip3 install pylint'
-                sh 'pylint app/app.py || true'
+                sh 'pylint python-app/app.py || true'
             }
         }
 
@@ -39,34 +49,45 @@ pipeline {
 
         stage('Push to DockerHub') {
             steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-                    sh '''
-                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                    docker push $IMAGE_NAME:$BUILD_NUMBER
-                    '''
+                withCredentials([string(credentialsId: 'dockerhub_credentials', variable: 'DOCKER_PASS')]) {
+                    script {
+                        def DOCKER_USER = "ahmadbilal124"
+                        sh """
+                            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                            docker push $IMAGE_NAME:$BUILD_NUMBER
+                        """
+                    }
                 }
             }
         }
 
-        stage('Deploy') {
+        stage('Deploy to Server') {
             steps {
-                sshagent(['your-ssh-key']) {
-                    sh '''
-                    ssh user@remote-server "
-                        docker pull $IMAGE_NAME:$BUILD_NUMBER &&
-                        docker stop flaskapp || true &&
-                        docker rm flaskapp || true &&
-                        docker run -d -p 5000:5000 --name flaskapp $IMAGE_NAME:$BUILD_NUMBER
-                    "
-                    '''
+                withCredentials([string(credentialsId: 'github_credentials', variable: 'SSH_PRIVATE_KEY')]) {
+                    sh """
+                        echo "$SSH_PRIVATE_KEY" > key.pem
+                        chmod 600 key.pem
+
+                        ssh -i key.pem -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST '
+                            docker pull $IMAGE_NAME:$BUILD_NUMBER &&
+                            docker stop $CONTAINER_NAME || true &&
+                            docker rm $CONTAINER_NAME || true &&
+                            docker run -d -p $APP_PORT:5000 --name $CONTAINER_NAME $IMAGE_NAME:$BUILD_NUMBER
+                        '
+
+                        rm key.pem
+                    """
                 }
             }
         }
     }
 
     post {
+        success {
+            echo "✅ Deployed: http://$DEPLOY_HOST:$APP_PORT"
+        }
         failure {
-            echo 'Build failed. Fix and push again to retry.'
+            echo "❌ Build failed. Fix and commit again to resume from failed stage."
         }
     }
 }
